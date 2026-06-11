@@ -169,7 +169,39 @@ router.post('/batch', (req: Request, res: Response) => {
   const db = getDb();
   const tournament = db.prepare('SELECT id FROM tournaments WHERE id = ?').get(tournament_id);
   if (!tournament) {
-    return res.status(404).json(errorResponse('比赛不存在', 404));
+    return res.status(404).json(errorResponse('赛事不存在', 404));
+  }
+
+  const errors: { index: number; name: string; error: string }[] = [];
+
+  for (let i = 0; i < players.length; i++) {
+    const p = players[i];
+    const displayName = p.name || `第${i + 1}条(无名)`;
+
+    if (!p.name || typeof p.name !== 'string' || p.name.trim() === '') {
+      errors.push({ index: i, name: displayName, error: '选手名称不能为空' });
+      continue;
+    }
+
+    if (p.group_id) {
+      const group = db.prepare(
+        'SELECT id, name FROM groups_table WHERE id = ? AND tournament_id = ?'
+      ).get(p.group_id, tournament_id);
+      if (!group) {
+        errors.push({ index: i, name: displayName, error: `分组 ${p.group_id} 不存在或不属于该赛事` });
+      }
+    }
+  }
+
+  if (errors.length > 0) {
+    return res.status(400).json({
+      code: 400,
+      message: `批量创建失败，共 ${errors.length} 条数据不合法`,
+      data: {
+        errors,
+        detail: errors.map(e => `第${e.index + 1}条 [${e.name}]: ${e.error}`).join('; ')
+      }
+    });
   }
 
   const createdAt = now();
@@ -182,9 +214,6 @@ router.post('/batch', (req: Request, res: Response) => {
 
   const transaction = db.transaction((playerList: any[]) => {
     for (const playerData of playerList) {
-      if (!playerData.name) {
-        throw new Error('选手名称不能为空');
-      }
       const id = generateId();
       insertStmt.run(
         id,
@@ -204,7 +233,7 @@ router.post('/batch', (req: Request, res: Response) => {
   try {
     transaction(players);
   } catch (err: any) {
-    return res.status(400).json(errorResponse('批量创建失败: ' + err.message, 400));
+    return res.status(500).json(errorResponse('批量创建失败: ' + err.message, 500));
   }
 
   res.status(201).json(successResponse({
@@ -222,42 +251,87 @@ router.get('/:id/history', (req: Request, res: Response) => {
     return res.status(404).json(errorResponse('选手不存在', 404));
   }
 
-  const matchPlayers = db.prepare(`
+  const confirmedMatches = db.prepare(`
     SELECT 
-      mp.*,
-      m.tournament_id,
-      m.round_id,
-      m.room_id,
+      m.id as match_id,
       m.status as match_status,
       m.started_at,
       m.ended_at,
-      r.round_number
-    FROM match_players mp
-    INNER JOIN matches m ON mp.match_id = m.id
+      r.round_number,
+      rm.name as room_name
+    FROM matches m
     INNER JOIN rounds r ON m.round_id = r.id
-    WHERE mp.player_id = ?
+    INNER JOIN rooms rm ON m.room_id = rm.id
+    INNER JOIN match_players mp ON mp.match_id = m.id
+    WHERE mp.player_id = ? AND m.status = 'confirmed'
     ORDER BY r.round_number DESC, m.created_at DESC
   `).all(id) as any[];
 
+  const matchIds = confirmedMatches.map(m => m.match_id);
+  let matchDetails: any[] = [];
   let wins = 0;
   let losses = 0;
   let draws = 0;
   let totalScore = 0;
 
-  for (const mp of matchPlayers) {
-    totalScore += mp.score || 0;
-    if (mp.is_winner === 1) {
-      wins++;
-    } else if (mp.match_status === 'completed') {
-      losses++;
+  if (matchIds.length > 0) {
+    const placeholders = matchIds.map(() => '?').join(',');
+    const allMatchPlayers = db.prepare(`
+      SELECT match_id, player_id, score, tiebreaker, is_winner, rank, seat_number
+      FROM match_players
+      WHERE match_id IN (${placeholders})
+    `).all(...matchIds) as any[];
+
+    const mpByMatch = new Map<string, any[]>();
+    for (const mp of allMatchPlayers) {
+      if (!mpByMatch.has(mp.match_id)) {
+        mpByMatch.set(mp.match_id, []);
+      }
+      mpByMatch.get(mp.match_id)!.push(mp);
     }
+
+    matchDetails = confirmedMatches.map(match => {
+      const mps = mpByMatch.get(match.match_id) || [];
+      const selfMp = mps.find(mp => mp.player_id === id);
+
+      if (selfMp) {
+        totalScore += selfMp.score || 0;
+
+        const hasAnyWinner = mps.some(mp => mp.is_winner === 1);
+        const allDraw = mps.every(mp => mp.is_winner === 0);
+
+        if (selfMp.is_winner === 1) {
+          wins++;
+        } else if (hasAnyWinner) {
+          losses++;
+        } else if (allDraw) {
+          draws++;
+        }
+      }
+
+      const playersWithNames = mps.map(mp => {
+        const p = db.prepare('SELECT name FROM players WHERE id = ?').get(mp.player_id) as { name: string } | undefined;
+        return {
+          ...mp,
+          player_name: p?.name || ''
+        };
+      });
+
+      return {
+        ...match,
+        self_score: selfMp?.score || 0,
+        self_rank: selfMp?.rank || null,
+        self_is_winner: selfMp?.is_winner === 1,
+        all_players: playersWithNames
+      };
+    });
   }
 
-  const totalMatches = matchPlayers.length;
+  const totalMatches = matchDetails.length;
   const winRate = totalMatches > 0 ? Number(((wins / totalMatches) * 100).toFixed(2)) : 0;
 
   const history: PlayerHistory = {
-    matches: matchPlayers,
+    matches: matchDetails,
     stats: {
       total_matches: totalMatches,
       wins,

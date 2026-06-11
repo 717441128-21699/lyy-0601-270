@@ -52,10 +52,44 @@ router.post('/', (req: Request, res: Response) => {
   const { tournament_id, round_id, room_id, player_ids } = req.body;
 
   if (!tournament_id || !round_id || !room_id || !Array.isArray(player_ids) || player_ids.length === 0) {
-    return res.status(400).json(errorResponse('缺少必要参数'));
+    return res.status(400).json(errorResponse('缺少必要参数: tournament_id, round_id, room_id, player_ids[]'));
   }
 
   const db = getDb();
+
+  const tournament = db.prepare('SELECT id FROM tournaments WHERE id = ?').get(tournament_id);
+  if (!tournament) {
+    return res.status(404).json(errorResponse('赛事不存在', 404));
+  }
+
+  const round = db.prepare('SELECT id FROM rounds WHERE id = ? AND tournament_id = ?').get(round_id, tournament_id);
+  if (!round) {
+    return res.status(400).json(errorResponse(`轮次 ${round_id} 不存在或不属于该赛事`, 400));
+  }
+
+  const room = db.prepare('SELECT id FROM rooms WHERE id = ? AND tournament_id = ?').get(room_id, tournament_id);
+  if (!room) {
+    return res.status(400).json(errorResponse(`房间 ${room_id} 不存在或不属于该赛事`, 400));
+  }
+
+  const placeholders = player_ids.map(() => '?').join(',');
+  const players = db.prepare(
+    `SELECT id FROM players WHERE id IN (${placeholders}) AND tournament_id = ?`
+  ).all(...player_ids, tournament_id) as { id: string }[];
+
+  if (players.length !== player_ids.length) {
+    const foundIds = new Set(players.map(p => p.id));
+    const invalidIds = player_ids.filter((id: string) => !foundIds.has(id));
+    return res.status(400).json(errorResponse(
+      `以下选手不存在或不属于该赛事: ${invalidIds.join(', ')}`, 400
+    ));
+  }
+
+  const uniqueIds = new Set(player_ids);
+  if (uniqueIds.size !== player_ids.length) {
+    return res.status(400).json(errorResponse('选手列表中存在重复ID', 400));
+  }
+
   const matchId = generateId();
   const createdAt = now();
 

@@ -36,7 +36,7 @@ router.post('/refresh', (req: Request, res: Response) => {
   const players = db.prepare(`
     SELECT p.id, p.name
     FROM players p
-    WHERE p.tournament_id = ? ${playerWhereClause}
+    WHERE p.tournament_id = ? AND p.status NOT IN ('withdrew', 'disqualified') ${playerWhereClause}
   `).all(...playerParams) as { id: string; name: string }[];
 
   if (players.length === 0) {
@@ -182,7 +182,7 @@ router.get('/', (req: Request, res: Response) => {
   const db = getDb();
   const { limit, offset } = paginate(Number(page), Number(pageSize));
 
-  const whereConditions = ['s.tournament_id = ?'];
+  const whereConditions = ['s.tournament_id = ?', "p.status NOT IN ('withdrew', 'disqualified')"];
   const params: any[] = [tournament_id];
 
   if (group_id) {
@@ -238,7 +238,7 @@ router.get('/big-screen', (req: Request, res: Response) => {
   const db = getDb();
   const displayLimit = Math.min(Number(limit), 100);
 
-  const whereConditions = ['s.tournament_id = ?'];
+  const whereConditions = ['s.tournament_id = ?', "p.status NOT IN ('withdrew', 'disqualified')"];
   const params: any[] = [tournament_id];
 
   if (group_id) {
@@ -395,7 +395,7 @@ router.post('/export', (req: Request, res: Response) => {
 
   const db = getDb();
 
-  const whereConditions = ['s.tournament_id = ?'];
+  const whereConditions = ['s.tournament_id = ?', "p.status NOT IN ('withdrew', 'disqualified')"];
   const params: any[] = [tournament_id];
 
   if (group_id) {
